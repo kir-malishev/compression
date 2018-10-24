@@ -1,4 +1,6 @@
 #include <stdio.h>
+#include <stdlib.h>
+#include <stdint.h>
 
 
 long long *get_arr(FILE *f)
@@ -12,7 +14,7 @@ long long *get_arr(FILE *f)
     return arr;
 }
 
-long long get_b(long long *arr, int j)
+long long get_b(const long long *arr, int j)
 {
     long long b = 0;
     for (int i = 0; i <= j; i++) {
@@ -26,6 +28,7 @@ void bits_plus_follow(FILE *f, long long bits_to_follow, int bit)
     static char st = 0;
     static int i = 7;
     if (bit == -1) {
+        //st |= (1 << i) - 1;
         fputc(st, f);
         return;
     }
@@ -47,6 +50,13 @@ void bits_plus_follow(FILE *f, long long bits_to_follow, int bit)
     }
 }
 
+
+
+long long round_div(long long x, long long y)
+{
+    return (x + (y / 2)) / y;
+}
+
 void compress(FILE *f, FILE *out)
 {
     fseek(f, 0, SEEK_END); // seek to end of file
@@ -58,7 +68,8 @@ void compress(FILE *f, FILE *out)
         //printf("%c %lld\n", k, arr[k + 1]);
     }
     long long l = 0;
-    long long h = 65535 * 2;
+    //long long h = 65535;
+    long long h = UINT32_MAX;
     long long i = 0;
     long long delitel = size;
     long long First_qtr = (h + 1) / 4;
@@ -69,10 +80,11 @@ void compress(FILE *f, FILE *out)
     while ((c = fgetc(f)) != EOF) {
         //printf("%lld\n", i);
         int j = (unsigned char) c + 1;
-        i++; // Находим его индекс
+        //i++; // Находим его индекс
+
         long long li = l + get_b(arr, j - 1) * (h - l + 1) / delitel;
         long long hi = l + get_b(arr, j) * (h - l + 1) / delitel - 1;
-        for (; li <= hi;) { // Обрабатываем варианты
+        for (; ;) { // Обрабатываем варианты
             if (hi < Half) { // переполнения
                 bits_plus_follow(out, bits_to_follow, 0);
                 bits_to_follow = 0;
@@ -81,11 +93,16 @@ void compress(FILE *f, FILE *out)
                 bits_to_follow = 0;
                 li -= Half;
                 hi -= Half;
-            } else if ((hi < First_qtr) && (li >= Third_qtr)) {
+            } else if ((hi < Third_qtr) && (li >= First_qtr)) {
                 bits_to_follow++;
                 li -= First_qtr;
                 hi -= First_qtr;
-            } else break;
+            } else if (((li < First_qtr) && (hi >= Third_qtr))){
+                bits_to_follow = 0;
+                break;
+            } else {
+                break;
+            }
             li += li;
             hi += hi + 1;
         }
@@ -102,9 +119,11 @@ int read_bit(FILE *f)
     static char st = 0;
     static int i = -1;
     if (i == -1) {
-        fread(&st, sizeof(st), 1, f);
+        if (fread(&st, sizeof(st), 1, f) < 1) {
+            st = 0;
+        }
         i = 7;
-        return st >> i;
+        return (st >> i) & 1;
     } else {
         i--;
         return (st >> (i + 1)) & 1;
@@ -132,27 +151,45 @@ void write_bit(FILE *f, int bit)
 void decompress(FILE *f, FILE *out)
 {
     long long l = 0;
-    long long h = 65535;
+    //long long h = 65535;
+    long long h = UINT32_MAX;
     long long i = 0;
     long long *arr = calloc(257, sizeof(long long));
     fread(arr, sizeof(long long), 257, f);
-//    for (int k = 0; k < 256; k++) {
-//        printf("%c %lld\n", k, arr[k + 1]);
-//    }
-    long long size = get_b(arr, 257);
+    for (int k = 0; k < 256; k++) {
+        printf("%c %lld\n", k, arr[k + 1]);
+    }
+    long long size = get_b(arr, 256);
     long long delitel = size;
     long long First_qtr = (h + 1) / 4;        // = 16384
     long long Half = First_qtr * 2;        // = 32768
     long long Third_qtr = First_qtr * 3;    // = 49152
-    char val;
-    fread(&val, sizeof(val), 1, f);
-    long long value = val;
-    while (!feof(f)) {
+    unsigned char val;
+    uint32_t value = 0;
+    for (int k = 0; k < 4; k++) {
+        value <<= 8;
+        if (fread(&val, sizeof(val), 1, f) < 1) {
+            val = 0;
+        }
+        value |= val;
+    }
+//    unsigned char val = 0;
+//    int a = fread(&val, sizeof(val), 1, f);
+//    uint16_t value = val << 8;
+//    if (fread(&val, sizeof(val), 1, f) < 1) {
+//        val = 0;
+//    }
+//    value |= val;
+    while (size--) {
         long long freq = ((value - l + 1) * delitel - 1) / (h - l + 1);
+        //long long freq = round_div(((value - l + 1) * delitel - 1), (h - l + 1));
+//        if (freq == -1) {
+//            freq = 0;
+//        }
         int j;
         for (j = 1; get_b(arr, j) <= freq; j++);
-        int a = 5;
-        if (j == 257) break;
+        char c = (char) (j - 1);
+        //if (j == 257) break;
         i++; // Находим его индекс
         long long li = l + get_b(arr, j - 1) * (h - l + 1) / delitel;
         long long hi = l + get_b(arr, j) * (h - l + 1) / delitel - 1;
@@ -162,7 +199,7 @@ void decompress(FILE *f, FILE *out)
                 value -= Half;
                 li -= Half;
                 hi -= Half;
-            } else if ((hi < First_qtr) && (li >= Third_qtr)) {
+            } else if ((hi < Third_qtr) && (li >= First_qtr)) {
                 value -= First_qtr;
                 li -= First_qtr;
                 hi -= First_qtr;
@@ -173,8 +210,8 @@ void decompress(FILE *f, FILE *out)
         }
         l = li;
         h = hi;
-        fputc(j - 1, out);
-        fputc(j - 1, out);
+        fputc(c, out);
+        printf("%d %c\n", c, c);
     }
     free(arr);
 }
