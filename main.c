@@ -3,29 +3,29 @@
 #include <stdint.h>
 
 
-long long *get_arr(FILE *f)
+unsigned int *get_arr(FILE *f)
 {
-    long long *arr = calloc(257, sizeof(long long));
+    unsigned int *arr = calloc(257, sizeof(unsigned int));
     int c;
     while ((c = fgetc(f)) != EOF) {
-        arr[(unsigned char) c + 1]++;
+        arr[c + 1]++;
     }
     fseek(f, 0, SEEK_SET);
     return arr;
 }
 
-long long get_b(const long long *arr, int j)
+unsigned int get_b(const unsigned int *arr, int j)
 {
-    long long b = 0;
+    unsigned int b = 0;
     for (int i = 0; i <= j; i++) {
         b += arr[i];
     }
     return b;
 }
 
-void bits_plus_follow(FILE *f, long long bits_to_follow, int bit)
+void bits_plus_follow(FILE *f, unsigned long long int bits_to_follow, int bit)
 {
-    static char st = 0;
+    static unsigned char st = 0;
     static int i = 7;
     if (bit == -1) {
         //st |= (1 << i) - 1;
@@ -52,73 +52,163 @@ void bits_plus_follow(FILE *f, long long bits_to_follow, int bit)
 
 
 
-long long round_div(long long x, long long y)
+unsigned long long int round_div(unsigned long long int x, unsigned long long int y)
 {
     return (x + (y / 2)) / y;
 }
 
+#define COUNT 32
+//const unsigned COUNT = 40;
+const unsigned long long int MAX_CODE = (1ULL << COUNT) - 1;
+
 void compress(FILE *f, FILE *out)
 {
+
     fseek(f, 0, SEEK_END); // seek to end of file
-    long long size = ftell(f); // get current file pointer
+    unsigned long long int size = (unsigned long long) ftell(f); // get current file pointer
     fseek(f, 0, SEEK_SET);
-    long long *arr = get_arr(f);
-    fwrite(arr, sizeof(long long), 257, out);
+    unsigned  int *arr = get_arr(f);
+    fwrite(arr, sizeof(unsigned int), 257, out);
     for (int k = 0; k < 256; k++) {
-        //printf("%c %lld\n", k, arr[k + 1]);
+        printf("%c %u\n", k, arr[k + 1]);
     }
-    long long l = 0;
-    //long long h = 65535;
-    long long h = UINT32_MAX;
-    long long i = 0;
-    long long delitel = size;
-    long long First_qtr = (h + 1) / 4;
-    long long Half = First_qtr * 2; // = 16384 = 32768
-    long long Third_qtr = First_qtr * 3;
-    long long bits_to_follow = 0; // = 49152, Сколько бит сбрасывать
+    unsigned long long int high = MAX_CODE;
+    unsigned long long int low = 0;
+    unsigned long long pending_bits = 0;
+    unsigned long long int First_qtr = (high +1)/4;
+    unsigned long long int Half = First_qtr*2; // = 16384 = 32768
+    unsigned long long int Third_qtr = First_qtr*3;
+    //unsigned long long int First_qtr = 0x40000000;
     int c;
     while ((c = fgetc(f)) != EOF) {
-        //printf("%lld\n", i);
-        int j = (unsigned char) c + 1;
-        //i++; // Находим его индекс
+        int j = c + 1;
 
-        long long li = l + get_b(arr, j - 1) * (h - l + 1) / delitel;
-        long long hi = l + get_b(arr, j) * (h - l + 1) / delitel - 1;
-        for (; ;) { // Обрабатываем варианты
-            if (hi < Half) { // переполнения
-                bits_plus_follow(out, bits_to_follow, 0);
-                bits_to_follow = 0;
-            } else if (li >= Half) {
-                bits_plus_follow(out, bits_to_follow, 1);
-                bits_to_follow = 0;
-                li -= Half;
-                hi -= Half;
-            } else if ((hi < Third_qtr) && (li >= First_qtr)) {
-                bits_to_follow++;
-                li -= First_qtr;
-                hi -= First_qtr;
-            } else if (((li < First_qtr) && (hi >= Third_qtr))){
-                bits_to_follow = 0;
-                break;
-            } else {
-                break;
+        unsigned long long int range =  high - low + 1;
+        //prob p = model.getProbability(c);
+        //        //i++; // Находим его индекс
+//        int a = get_b(arr, j - 1);
+//        int b = get_b(arr, j);
+//        unsigned long long c = get_b(arr, j - 1) * range;
+//        unsigned long long d = (range * get_b(arr, j - 1))/size;
+//        unsigned long long e = (range * get_b(arr, j))/size;
+        high = low + range * get_b(arr, j)/size - 1;
+        low = low +  range * get_b(arr, j - 1)/size;
+        for ( ; ; ) {
+            if ( high < Half ) {
+                bits_plus_follow(out, pending_bits, 0);
+                pending_bits = 0;
+//                low <<= 1;
+//                high <<= 1;
+//                high |= 1;
+            } else if ( low >= Half ) {
+                bits_plus_follow(out, pending_bits, 1);
+                pending_bits = 0;
+                low -= Half;
+                high -= Half;
+                //low -= 0x80000000U;
+                //high -= 0x80000000U;
+//                low <<= 1;
+//                high <<= 1;
+//                high |= 1;
             }
-            li += li;
-            hi += hi + 1;
+            else if ( low >= First_qtr && high < Third_qtr ) {
+                pending_bits++;
+                low -= First_qtr;
+                high -= First_qtr;
+//                low <<= 1;
+//                low &= 0x7FFFFFFF;
+//                high <<= 1;
+//                high |= 0x80000001;
+            }
+            else
+                break;
+            high <<= 1;
+            high++;
+            low <<= 1;
+            high &= MAX_CODE;
+            low &= MAX_CODE;
+            //low &= 0x7FFFFFFF;
+            //high |= 0x80000001;
+//            low = (unsigned) low;
+//            high = (unsigned) high;
         }
-        l = li;
-        h = hi;
     }
+    pending_bits++;
+    if ( low < First_qtr)
+        bits_plus_follow(out, pending_bits, 0);
+    else
+        bits_plus_follow(out, pending_bits, 1);
     bits_plus_follow(out, 0, -1);
     free(arr);
     fseek(out, 0, SEEK_SET);
+
+//    fseek(f, 0, SEEK_END); // seek to end of file
+//    unsigned long long int size = (unsigned long long) ftell(f); // get current file pointer
+//    fseek(f, 0, SEEK_SET);
+//    unsigned long long int *arr = get_arr(f);
+//    fwrite(arr, sizeof(unsigned long long int), 257, out);
+//    for (int k = 0; k < 256; k++) {
+//        //printf("%c %lld\n", k, arr[k + 1]);
+//    }
+//    unsigned long long int l = 0;
+//    unsigned long long int h = 0xFFFFFFFFU - 1;
+//    unsigned long long int i = 0;
+//    unsigned long long int delitel = size;
+//    unsigned long long int First_qtr = 0x40000000; //(h + 1) / 4;
+//    unsigned long long int Half = First_qtr * 2; // = 16384 = 32768
+//    unsigned long long int Third_qtr = First_qtr * 3;
+//    unsigned long long int bits_to_follow = 0; // = 49152, Сколько бит сбрасывать
+//    int c;
+//    while ((c = fgetc(f)) != EOF) {
+//        //printf("%lld\n", i);
+//        int j = c + 1;
+//        unsigned long long long long range = h - l + 1;
+//        //i++; // Находим его индекс
+//        int a = get_b(arr, j - 1);
+//        int b = get_b(arr, j);
+//        unsigned long long long long c = get_b(arr, j - 1) * range;
+//        l = l + ((unsigned long long long long) get_b(arr, j - 1)) * range / delitel;
+//        h = l + ((unsigned long long long long) get_b(arr, j)) * range / delitel - 1;
+//        for (; ;) { // Обрабатываем варианты
+//            if (h < Half) { // переполнения
+//                bits_plus_follow(out, bits_to_follow, 0);
+//                bits_to_follow = 0;
+//                l <<= 1;
+//                h <<= 1;
+//                h |= 1;
+//            } else if (l >= Half) {
+//                bits_plus_follow(out, bits_to_follow, 1);
+//                bits_to_follow = 0;
+//                l <<= 1;
+//                h <<= 1;
+//                h |= 1;
+//                //li -= Half;
+//                //hi -= Half;
+//            } else if ((h < Third_qtr) && (l >= First_qtr)){
+//                bits_to_follow++;
+//                l <<= 1;
+//                l &= 0x7FFFFFFF;
+//                h <<= 1;
+//                h |= 0x80000001;
+////                l -= First_qtr;
+////                h -= First_qtr;
+//            } else {
+//                break;
+//            }
+////            l += l;
+////            h += h + 1;
+//        }
+//    }
+//    bits_plus_follow(out, 0, -1);
+//    free(arr);
+//    fseek(out, 0, SEEK_SET);
 }
 
 int read_bit(FILE *f)
 {
-    static char st = 0;
-    static int i = -1;
-    if (i == -1) {
+    static unsigned char st = 0;
+    static int i = 0;
+    if (i == 0) {
         if (fread(&st, sizeof(st), 1, f) < 1) {
             st = 0;
         }
@@ -126,7 +216,7 @@ int read_bit(FILE *f)
         return (st >> i) & 1;
     } else {
         i--;
-        return (st >> (i + 1)) & 1;
+        return (st >> i) & 1;
     }
 }
 
@@ -150,30 +240,40 @@ void write_bit(FILE *f, int bit)
 
 void decompress(FILE *f, FILE *out)
 {
-    long long l = 0;
-    //long long h = 65535;
-    long long h = UINT32_MAX;
-    long long i = 0;
-    long long *arr = calloc(257, sizeof(long long));
-    fread(arr, sizeof(long long), 257, f);
+    unsigned long long int high = MAX_CODE;
+    unsigned long long int low = 0;
+    unsigned long long int First_qtr = (high +1)/4;
+    unsigned long long int Half = First_qtr*2; // = 16384 = 32768
+    unsigned long long int Third_qtr = First_qtr*3;
+    //unsigned long long int low = 0;
+    //unsigned long long int h = 65535;
+    //unsigned long long int high = 0xFFFFFFFFU;
+    //unsigned long long int i = 0;
+    unsigned int *arr = calloc(257, sizeof(unsigned int));
+    fread(arr, sizeof(unsigned int), 257, f);
     for (int k = 0; k < 256; k++) {
-        printf("%c %lld\n", k, arr[k + 1]);
+        printf("%c %u\n", k, arr[k + 1]);
     }
-    long long size = get_b(arr, 256);
-    long long delitel = size;
-    long long First_qtr = (h + 1) / 4;        // = 16384
-    long long Half = First_qtr * 2;        // = 32768
-    long long Third_qtr = First_qtr * 3;    // = 49152
+    unsigned long long int size = get_b(arr, 256);
+    unsigned long long int delitel = size;
+//    unsigned long long int First_qtr = 0x40000000;   // = 16384
+//    unsigned long long int Half = First_qtr * 2;        // = 32768
+//    unsigned long long int Third_qtr = First_qtr * 3;    // = 49152
     unsigned char val;
-    uint32_t value = 0;
-    for (int k = 0; k < 4; k++) {
-        value <<= 8;
-        if (fread(&val, sizeof(val), 1, f) < 1) {
-            val = 0;
-        }
-        value |= val;
+    uint64_t value = 0;
+    for (int i = 0; i < COUNT; i++) {
+        value <<= 1;
+        int b = read_bit(f);
+        value += b;
     }
-//    unsigned char val = 0;
+//    for (int k = 0; k < COUNT/8; k++) {
+//        value <<= 8;
+//        if (fread(&val, sizeof(val), 1, f) < 1) {
+//            val = 0;
+//        }
+//        value |= val;
+//    }
+//    unsigned long long char val = 0;
 //    int a = fread(&val, sizeof(val), 1, f);
 //    uint16_t value = val << 8;
 //    if (fread(&val, sizeof(val), 1, f) < 1) {
@@ -181,8 +281,9 @@ void decompress(FILE *f, FILE *out)
 //    }
 //    value |= val;
     while (size--) {
-        long long freq = ((value - l + 1) * delitel - 1) / (h - l + 1);
-        //long long freq = round_div(((value - l + 1) * delitel - 1), (h - l + 1));
+        unsigned long long range = high - low + 1;
+        unsigned long long freq = ((value - low + 1)*delitel - 1)/range;
+        //unsigned long long int freq = round_div(((value - l + 1) * delitel - 1), (h - l + 1));
 //        if (freq == -1) {
 //            freq = 0;
 //        }
@@ -190,28 +291,53 @@ void decompress(FILE *f, FILE *out)
         for (j = 1; get_b(arr, j) <= freq; j++);
         char c = (char) (j - 1);
         //if (j == 257) break;
-        i++; // Находим его индекс
-        long long li = l + get_b(arr, j - 1) * (h - l + 1) / delitel;
-        long long hi = l + get_b(arr, j) * (h - l + 1) / delitel - 1;
+        //i++; // Находим его индекс
+        int a = get_b(arr, j - 1);
+        int b = get_b(arr, j);
+        int d = get_b(arr, j) * range / delitel;
+        high = low + get_b(arr, j) * range / delitel - 1;
+        low = (low + get_b(arr, j - 1) * range / delitel);
         for (;;) {
-            if (hi < Half);
-            else if (li >= Half) {
-                value -= Half;
-                li -= Half;
-                hi -= Half;
-            } else if ((hi < Third_qtr) && (li >= First_qtr)) {
+            if ( high < Half ) {
+                //do nothing, bit is a zero
+            } else if ( low >= Half ) {
+                value -= Half;  //subtract one half from all three code values
+                low -= Half;
+                high -= Half;
+            } else if ( low >= First_qtr && high < Third_qtr) {
                 value -= First_qtr;
-                li -= First_qtr;
-                hi -= First_qtr;
-            } else break;
-            li += li;
-            hi += hi + 1;
-            value += value + read_bit(f);//Добавляем бит из файла
+                low -= First_qtr;
+                high -= First_qtr;
+            } else
+                break;
+            low <<= 1;
+            high <<= 1;
+            high++;
+            value <<= 1;
+//            low = (unsigned) low;
+//            high = (unsigned) high;
+            value += read_bit(f);
+            value &= MAX_CODE;
+            low &= MAX_CODE;
+            high &= MAX_CODE;
+//            if (low >= 0x80000000U || high < 0x80000000U) {
+//                l <<= 1;
+//                h <<= 1;
+//                h |= 1;
+//                value += read_bit(f);
+//            } else if (l >= 0x40000000 && h < 0xC0000000U) {
+//                l <<= 1;
+//                l &= 0x7FFFFFFF;
+//                h <<= 1;
+//                h |= 0x80000001;
+//                value += read_bit(f);
+//            } else
+//                break;
+//            l = (unsigned) l;
+//            h = (unsigned) h;
         }
-        l = li;
-        h = hi;
         fputc(c, out);
-        printf("%d %c\n", c, c);
+        //printf("%d %c\n", c, c);
     }
     free(arr);
 }
@@ -219,9 +345,9 @@ void decompress(FILE *f, FILE *out)
 
 int main(void)
 {
-    FILE *in = fopen("in.txt", "r");
-    FILE *out = fopen("out.txt", "w+");
-    FILE *out1 = fopen("out1.txt", "w");
+    FILE *in = fopen("in.pdf", "r");
+    FILE *out = fopen("out.bin", "w+");
+    FILE *out1 = fopen("out1.pdf", "w");
     compress(in, out);
     decompress(out, out1);
     return 0;
