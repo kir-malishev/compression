@@ -3,4 +3,4 @@ project(graph C)
 
 set(CMAKE_C_STANDARD 11)
 
-add_executable(graph main.c)
+add_executable(graph main.c ari.h)
