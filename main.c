@@ -168,7 +168,7 @@ void compress_ari(char *ifile, char *ofile) {
         exps[i] = 128.5;
     }
     //unsigned long long int step = MIN(100, MAX(10, size/10));
-    unsigned long long int step = 30;
+    unsigned long long int step = 10;
     unsigned long long int buf_freq[step][257];
     unsigned long long int buf_ind = 0;
     for (int i = 0; i < step; i++) {
@@ -219,7 +219,7 @@ void compress_ari(char *ifile, char *ofile) {
         //long long d_dist = dist1 - dist2;
         //printf("%lld ", d_freq);
         //exps[buf_ind] = expected(base_freq.freq);
-        //transform(&base_freq, buf_freq, buf_ind, step);
+        transform(&base_freq, buf_freq, buf_ind, step);
         //if (fabs(exps[buf_ind] - exps[mod(buf_ind - 9, 10)]) >= MAX_EXP) {
         //d_freq += DD_FREQ;
         //init(&base_freq);
@@ -357,7 +357,7 @@ void decompress_ari(char *ifile, char *ofile) {
         //long long d_dist = dist1 - dist2;
         //printf("%lld ", d_freq);
         //exps[buf_ind] = expected(base_freq.freq);
-        //transform(&base_freq, buf_freq, buf_ind, step);
+        transform(&base_freq, buf_freq, buf_ind, step);
         //if (fabs(exps[buf_ind] - exps[mod(buf_ind - 9, 10)]) >= MAX_EXP) {
         //d_freq += DD_FREQ;
         //init(&base_freq);
@@ -393,7 +393,7 @@ int main(void)
 //    FILE *in = fopen("f", "r");
 //    FILE *out = fopen("out.bin", "w+");
 //    FILE *out1 = fopen("out1.txt", "w");
-    compress_ari("test_7", "tmp1.bin");
+    compress_ari("CloakNTEngine.dll", "tmp1.bin");
     decompress_ari("tmp1.bin", "out1.bin");
     return 0;
 }
