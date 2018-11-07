@@ -5,17 +5,14 @@
 
 
 
-typedef unsigned int  uint;
-
-#define  DO(n)	   for (int _=0; _<n; _++)
 #define  TOP	   (1<<24)
 
 typedef struct RangeCoder
 {
-    uint code;
-    uint range;
-    uint FFNum;
-    uint Cache;
+    unsigned int code;
+    unsigned int range;
+    unsigned int FFNum;
+    unsigned int Cache;
     int64_t low;
     FILE *f;
 } RangeCoder;
@@ -35,30 +32,34 @@ void ShiftLow(RangeCoder *rc)
         putc ((int) (rc->Cache + (rc->low>>32)), rc->f );
         int c = (int) (0xFF+(rc->low>>32));
         while(rc->FFNum ) putc(c, rc->f), (rc->FFNum)--;
-        rc->Cache = (uint) (rc->low)>>24;
+        rc->Cache = (unsigned int) (rc->low)>>24;
     } else (rc->FFNum)++;
-    rc->low = (uint) (rc->low)<<8;
+    rc->low = (unsigned int) (rc->low)<<8;
 }
 
 void StartEncode(RangeCoder *rc, FILE *out )
 {
     rc->low=rc->FFNum=rc->Cache=0;
-    rc->range=(uint)-1;
+    rc->range=(unsigned int)-1;
     rc->f = out;
 }
 
 void StartDecode(RangeCoder *rc, FILE *in )
 {
     rc->code=0;
-    rc->range=(uint)-1;
+    rc->range=(unsigned int)-1;
     rc->f = in;
-    DO(5) rc->code=(rc->code<<8) | getc(rc->f);
+    for (int i = 0; i < 5; i++) {
+        rc->code = (rc->code << 8) | getc(rc->f);
+    }
 }
 
 void FinishEncode(RangeCoder *rc)
 {
     rc->low+=1;
-    DO(5) ShiftLow(rc);
+    for (int i = 0; i < 5; i++) {
+        ShiftLow(rc);
+    }
 }
 
 
@@ -70,11 +71,11 @@ void encode(RangeCoder *rc, int cumFreq, int freq, int totFreq)
 }
 
 
-uint get_freq (RangeCoder *rc, int totFreq) {
+unsigned int get_freq (RangeCoder *rc, int totFreq) {
     return rc->code / (rc->range/= totFreq);
 }
 
-void decode_update (RangeCoder *rc, int cumFreq, int freq, int totFreq)
+void decode_update (RangeCoder *rc, int cumFreq, int freq)
 {
     rc->code -= cumFreq*rc->range;
     rc->range *= freq;
@@ -103,15 +104,19 @@ const int MAX_TotFr = 0x3fff;
 
 
 
-void init_model (int context[], int *SP, ContextModel cm[], RangeCoder *AC){
+void init_model (int context[2], int *SP, ContextModel cm1[257], ContextModel cm2[256][256], RangeCoder *AC){
     rc_clear(AC);
     for ( int j = 0; j < 256; j++ ) {
-        cm_clear(&cm[j]);
-        cm[256].count[j] = 1;
+        for (int k = 0; k < 256; k++) {
+            cm_clear(&cm2[j][k]);
+        }
+        cm_clear(&cm1[j]);
+        cm1[256].count[j] = 1;
     }
-    cm[256].TotFr = 256;
-    cm[256].esc = 1;
+    cm1[256].TotFr = 256;
+    cm1[256].esc = 1;
     context[0] = 0;
+    context[1] = 0;
     *SP = 0;
 }
 
@@ -141,19 +146,17 @@ int decode_sym (int *SP, ContextModel *stack[], RangeCoder *AC, ContextModel *CM
     if (cum_freq < CM->TotFr){
         int CumFreqUnder = 0;
         int i = 0;
-        for (;;){
+        for (;;) {
             if ( (CumFreqUnder + CM->count[i]) <= cum_freq)
                 CumFreqUnder += CM->count[i];
             else break;
             i++;
         }
-        decode_update(AC, CumFreqUnder, CM->count[i],
-                      CM->TotFr + CM->esc);
+        decode_update(AC, CumFreqUnder, CM->count[i]);
         *c = i;
         return 1;
     }else{
-        decode_update(AC, CM->TotFr, CM->esc,
-                      CM->TotFr + CM->esc);
+        decode_update(AC, CM->TotFr, CM->esc);
         return 0;
     }
 }
@@ -178,47 +181,61 @@ void update_model(int *SP, ContextModel *stack[], int c){
     }
 }
 
+
+ContextModel cm1[257], cm2[256][256];
 void compress (FILE *ifp, FILE *ofp) {
-    int	context[1];
+    int	context[2];
     int SP;
-    ContextModel cm[257], *stack[2];
+    ContextModel *stack[3];
     RangeCoder AC;
     //int cnt = 0;
     int	c, success;
-    init_model(context, &SP, cm, &AC);
+    init_model(context, &SP, cm1, cm2, &AC);
     StartEncode (&AC, ofp);
     while (( c = getc(ifp) ) != EOF) {
         //cnt++;
-        success = encode_sym(&SP, stack, &AC, &cm[context[0]], c);
+        success = encode_sym(&SP, stack, &AC, &cm2[context[0]][context[1]], c);
+    if (!success) {
+        success = encode_sym(&SP, stack, &AC, &cm1[context[0]], c);
         if (!success)
-            encode_sym(&SP, stack, &AC, &cm[256], c);
+            encode_sym(&SP, stack, &AC, &cm1[256], c);
+    }
         update_model(&SP, stack, c);
+        context[1] = context[0];
         context [0] = c;
     }
-    if (cm[context[0]].TotFr)
-        encode (&AC, cm[context[0]].TotFr, cm[context[0]].esc,
-                cm[context[0]].TotFr + cm[context[0]].esc)
-                ;
-    encode (&AC, cm[256].TotFr, cm[256].esc,
-            cm[256].TotFr + cm[256].esc);
+    if (cm2[context[0]][context[1]].TotFr) {
+        encode(&AC, cm2[context[0]][context[1]].TotFr, cm2[context[0]][context[1]].esc, cm2[context[0]][context[1]].TotFr + cm2[context[0]][context[1]].esc);
+    }
+    if (cm1[context[0]].TotFr) {
+        encode(&AC, cm1[context[0]].TotFr, cm1[context[0]].esc,
+               cm1[context[0]].TotFr + cm1[context[0]].esc);
+    }
+    encode (&AC, cm1[256].TotFr, cm1[256].esc,
+            cm1[256].TotFr + cm1[256].esc);
     FinishEncode(&AC);
 }
 
 void decode (FILE *ifp, FILE *ofp){
-    int	context[1];
+    int	context[2];
     int SP;
-    ContextModel cm[257], *stack[2];
+    ContextModel *stack[3];
     RangeCoder AC;
     int	c, success;
-    init_model(context, &SP, cm, &AC);
+    init_model(context, &SP, cm1, cm2, &AC);
     StartDecode (&AC, ifp);
     for (;;){
-        success = decode_sym(&SP, stack, &AC, &cm[context[0]], &c);
-        if (!success){
-            success = decode_sym(&SP, stack, &AC, &cm[256], &c);
-            if (!success) break;
+
+        success = decode_sym(&SP, stack, &AC,  &cm2[context[0]][context[1]], &c);
+        if (!success) {
+            success = decode_sym(&SP, stack, &AC, &cm1[context[0]], &c);
+            if (!success){
+                success = decode_sym(&SP, stack, &AC, &cm1[256], &c);
+                if (!success) break;
+            }
         }
         update_model(&SP, stack, c);
+        context[1] = context[0];
         context [0] = c;
         putc(c, ofp);
     }
@@ -252,6 +269,6 @@ void decompress_ppm(char *ifile, char *ofile) {
 
 
 int main (int argc, char* argv[]){
-    compress_ppm("FP.LOG", "tmp.bin");
+    compress_ppm("Война и мир.txt", "tmp.bin");
     decompress_ppm("tmp.bin", "out.bin");
 }
