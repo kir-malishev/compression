@@ -1,399 +1,257 @@
-#include <stdlib.h>
+
 #include <stdio.h>
 #include <stdint.h>
-#include <string.h>
-#include <math.h>
-
-
-#include "ari.h"
 
 
 
-long long d_freq;
 
-typedef struct Frequency
+typedef unsigned int  uint;
+
+#define  DO(n)	   for (int _=0; _<n; _++)
+#define  TOP	   (1<<24)
+
+typedef struct RangeCoder
 {
-    unsigned long long char_to_index[256];
-    unsigned long long index_to_char[257];
-    unsigned long long freq[257];
-    unsigned long long cum_freq[257];
-    unsigned long long sym;
-} Frequency;
+    uint code;
+    uint range;
+    uint FFNum;
+    uint Cache;
+    int64_t low;
+    FILE *f;
+} RangeCoder;
 
-int mod (int a, int b)
+void rc_clear(RangeCoder *AC) {
+    AC->code = 0;
+    AC->range = 0;
+    AC->FFNum = 0;
+    AC->Cache = 0;
+    AC->low = 0;
+    AC->f = 0;
+}
+
+void ShiftLow(RangeCoder *rc)
 {
-    if(b < 0) //you can check for b == 0 separately and do what you want
-        return mod(a, -b);
-    int ret = a % b;
-    if(ret < 0)
-        ret+=b;
-    return ret;
+    if ( (rc->low>>24)!=0xFF ) {
+        putc ((int) (rc->Cache + (rc->low>>32)), rc->f );
+        int c = (int) (0xFF+(rc->low>>32));
+        while(rc->FFNum ) putc(c, rc->f), (rc->FFNum)--;
+        rc->Cache = (uint) (rc->low)>>24;
+    } else (rc->FFNum)++;
+    rc->low = (uint) (rc->low)<<8;
 }
 
-
-
-void bits_plus_follow(FILE *f, unsigned long long int bits_to_follow, int bit)
+void StartEncode(RangeCoder *rc, FILE *out )
 {
-    static unsigned char st = 0;
-    static int i = 7;
-    if (bit == -1 && st) {
-        //st |= (1 << i) - 1;
-        fputc(st, f);
-        return;
+    rc->low=rc->FFNum=rc->Cache=0;
+    rc->range=(uint)-1;
+    rc->f = out;
+}
+
+void StartDecode(RangeCoder *rc, FILE *in )
+{
+    rc->code=0;
+    rc->range=(uint)-1;
+    rc->f = in;
+    DO(5) rc->code=(rc->code<<8) | getc(rc->f);
+}
+
+void FinishEncode(RangeCoder *rc)
+{
+    rc->low+=1;
+    DO(5) ShiftLow(rc);
+}
+
+
+void encode(RangeCoder *rc, int cumFreq, int freq, int totFreq)
+{
+    rc->low += cumFreq * (rc->range/= totFreq);
+    rc->range*= freq;
+    while(rc->range<TOP ) ShiftLow(rc), rc->range<<=8;
+}
+
+
+uint get_freq (RangeCoder *rc, int totFreq) {
+    return rc->code / (rc->range/= totFreq);
+}
+
+void decode_update (RangeCoder *rc, int cumFreq, int freq, int totFreq)
+{
+    rc->code -= cumFreq*rc->range;
+    rc->range *= freq;
+    while( rc->range<TOP ) rc->code=(rc->code<<8)|getc(rc->f), rc->range<<=8;
+}
+
+
+
+
+typedef  struct ContextModel{
+    int	esc,
+            TotFr;
+    int	count[256];
+} ContextModel;
+
+void cm_clear(ContextModel *cm) {
+    cm->esc = 0;
+    cm->TotFr = 0;
+    for (int i = 0; i < 256; i++) {
+        cm->count[i] = 0;
     }
-    st ^= (-(bit) ^ st) & (1UL << i);
-    if (i) {
-        i--;
-    } else {
-        fputc(st, f);
-        i = 7;
+}
+
+
+const int MAX_TotFr = 0x3fff;
+
+
+
+void init_model (int context[], int *SP, ContextModel cm[], RangeCoder *AC){
+    rc_clear(AC);
+    for ( int j = 0; j < 256; j++ ) {
+        cm_clear(&cm[j]);
+        cm[256].count[j] = 1;
     }
-    for (; bits_to_follow > 0; bits_to_follow--) {
-        st ^= (-(!bit) ^ st) & (1UL << i);
-        if (i) {
-            i--;
-        } else {
-            fputc(st, f);
-            i = 7;
+    cm[256].TotFr = 256;
+    cm[256].esc = 1;
+    context[0] = 0;
+    *SP = 0;
+}
+
+
+
+int encode_sym (int *SP, ContextModel *stack[], RangeCoder *AC, ContextModel *CM, int c){
+    stack[(*SP)++] = CM;
+    if (CM->count[c]){
+        int CumFreqUnder = 0;
+        for (int i = 0; i < c; i++)
+            CumFreqUnder += CM->count[i];
+        encode(AC, CumFreqUnder, CM->count[c], CM->TotFr + CM->esc);
+        return 1;
+    }else{
+        if (CM->esc){
+            encode(AC, CM->TotFr, CM->esc, CM->TotFr + CM->esc);
         }
+        return 0;
     }
 }
 
-void init(Frequency *fr) {
-    for (unsigned i = 0; i < 257; i++)
-    {
-        fr->char_to_index[i] = i + 1;
-        fr->index_to_char[i + 1] = i;
-    }
-    for (int i = 0; i < 257; i++)
-    {
-        fr->freq[i] = 1;
-        fr->cum_freq[i] = 257U - i;
-    }
-    fr->freq[0] = 0;
-}
+int decode_sym (int *SP, ContextModel *stack[], RangeCoder *AC, ContextModel *CM, int *c){
+    stack[(*SP)++] = CM;
+    if (!CM->esc) return 0;
 
-void update(Frequency *fr, unsigned long long sym, long long d_freq) {
-    unsigned long long ch_i, ch_symbol;
-    unsigned long long cum;
-    if (fr->cum_freq[0] >= MAX_CODE)
-    {
-        cum = 0;
-        for (long long i = 256; i >= 0; i--)
-        {
-            fr->freq[i] = (fr->freq [i] + 1) / 2;
-            fr->cum_freq[i] = cum;
-            cum += fr->freq [i];
+    int cum_freq = get_freq(AC, CM->TotFr + CM->esc);
+    if (cum_freq < CM->TotFr){
+        int CumFreqUnder = 0;
+        int i = 0;
+        for (;;){
+            if ( (CumFreqUnder + CM->count[i]) <= cum_freq)
+                CumFreqUnder += CM->count[i];
+            else break;
+            i++;
         }
-    }
-
-    unsigned long long i;
-    for ( i = sym; fr->freq [i] == fr->freq [i - 1]; i--);
-    if (i < sym) {
-        ch_i = fr->index_to_char[i];
-        ch_symbol = fr->index_to_char[sym];
-        fr->index_to_char[i] = ch_symbol;
-        fr->index_to_char[sym] = ch_i;
-        fr->char_to_index[ch_i] = sym;
-        fr->char_to_index[ch_symbol] = i;
-
-    }
-    unsigned long long int a = fr->cum_freq[256];
-    unsigned long long b = i;
-    fr->freq[i] += d_freq;
-
-    while (i-- > 0)
-    {
-        fr->cum_freq[i] += d_freq;
-    }
-    if (fr->cum_freq[256] == 1001) {
-        int c = 0;
+        decode_update(AC, CumFreqUnder, CM->count[i],
+                      CM->TotFr + CM->esc);
+        *c = i;
+        return 1;
+    }else{
+        decode_update(AC, CM->TotFr, CM->esc,
+                      CM->TotFr + CM->esc);
+        return 0;
     }
 }
 
-unsigned long long dist(const unsigned long long int a[257], const unsigned long long int b[257]) {
-    unsigned long long res = 0;
-    for (int i = 0; i < 257; i++) {
-        res += (a[i] - b[i])*(a[i] - b[i]);
+void rescale (ContextModel *CM){
+    CM->TotFr = 0;
+    for (int i = 0; i < 256; i++){
+        CM->count[i] -= CM->count[i] >> 1;
+        CM->TotFr += CM->count[i];
     }
-    return res;
 }
 
-double expected(const unsigned long long int a[257]) {
-    unsigned long long sum = 0;
-    double exp = 0;
-    for (int i = 0; i < 257; i++) {
-        sum += a[i];
+void update_model(int *SP, ContextModel *stack[], int c){
+    while (*SP) {
+        (*SP)--;
+        if (stack[*SP]->TotFr >= MAX_TotFr)
+            rescale (stack[*SP]);
+        stack[*SP]->TotFr += 1;
+        if (!stack[*SP]->count[c])
+            stack[*SP]->esc += 1;
+        stack[*SP]->count[c] += 1;
     }
-    for (int i = 0; i < 257; i++) {
-        exp += ((double) a[i]/sum)*i;
-    }
-    return exp;
 }
 
-void transform(Frequency *base_freq, unsigned long long buf_freq[][257], unsigned long long int buf_ind, unsigned long long int step) {
-    for (unsigned long long int i = 1; i < 257; i++) {
-        if (buf_freq[buf_ind][i] - buf_freq[(buf_ind + 1) % step][i] == 0 && base_freq->freq[i] != 1) {
+void compress (FILE *ifp, FILE *ofp) {
+    int	context[1];
+    int SP;
+    ContextModel cm[257], *stack[2];
+    RangeCoder AC;
+    //int cnt = 0;
+    int	c, success;
+    init_model(context, &SP, cm, &AC);
+    StartEncode (&AC, ofp);
+    while (( c = getc(ifp) ) != EOF) {
+        //cnt++;
+        success = encode_sym(&SP, stack, &AC, &cm[context[0]], c);
+        if (!success)
+            encode_sym(&SP, stack, &AC, &cm[256], c);
+        update_model(&SP, stack, c);
+        context [0] = c;
+    }
+    if (cm[context[0]].TotFr)
+        encode (&AC, cm[context[0]].TotFr, cm[context[0]].esc,
+                cm[context[0]].TotFr + cm[context[0]].esc)
+                ;
+    encode (&AC, cm[256].TotFr, cm[256].esc,
+            cm[256].TotFr + cm[256].esc);
+    FinishEncode(&AC);
+}
 
-            update(base_freq, i, -(base_freq->freq[i]/2));
+void decode (FILE *ifp, FILE *ofp){
+    int	context[1];
+    int SP;
+    ContextModel cm[257], *stack[2];
+    RangeCoder AC;
+    int	c, success;
+    init_model(context, &SP, cm, &AC);
+    StartDecode (&AC, ifp);
+    for (;;){
+        success = decode_sym(&SP, stack, &AC, &cm[context[0]], &c);
+        if (!success){
+            success = decode_sym(&SP, stack, &AC, &cm[256], &c);
+            if (!success) break;
         }
+        update_model(&SP, stack, c);
+        context [0] = c;
+        putc(c, ofp);
     }
 }
 
-void compress_ari(char *ifile, char *ofile) {
 
-    FILE *ifp = (FILE *)fopen(ifile, "rb");
-    FILE *ofp = (FILE *)fopen(ofile, "wb");
-
-    /** PUT YOUR CODE HERE
-      * implement an arithmetic encoding algorithm for compression
-      * don't forget to change header file `ari.h`
-    */
-    fseek(ifp, 0, SEEK_END); // seek to end of file
-    unsigned long long  int size = (unsigned long long int) ftell(ifp); // get current file pointer
-    fseek(ifp, 0, SEEK_SET);
-    if (size)
-        fwrite(&size, sizeof(size), 1, ofp);
-    /*unsigned char_to_index[256];
-    unsigned index_to_char[257];
-    unsigned freq[257];
-    unsigned cum_freq[257];
-    */
-    Frequency base_freq;
-    init(&base_freq);
-    Frequency ctrl_freq;
-    init(&ctrl_freq);
-    double exps[10];
-    for (int i = 0; i < 10; i++) {
-        exps[i] = 128.5;
-    }
-    //unsigned long long int step = MIN(100, MAX(10, size/10));
-    unsigned long long int step = 10;
-    unsigned long long int buf_freq[step][257];
-    unsigned long long int buf_ind = 0;
-    for (int i = 0; i < step; i++) {
-        memcpy(buf_freq[i], ctrl_freq.freq, 257*sizeof(*(ctrl_freq.freq)));
-    }
-    d_freq = START_D_FREQ;
-    unsigned long long int high = MAX_CODE;
-    unsigned long long int low = 0;
-    unsigned long long int pending_bits = 0;
-    unsigned long long int First_qtr = (high +1)/4;
-    unsigned long long int Half = First_qtr*2; // = 16384 = 32768
-    unsigned long long int Third_qtr = First_qtr*3;
-    int c;
-    while ((c = fgetc(ifp)) != EOF) {
-        base_freq.sym = base_freq.char_to_index[c];
-        unsigned long long int range =  high - low + 1;
-        high = (unsigned long long) (low + ( range * base_freq.cum_freq[base_freq.sym - 1])/base_freq.cum_freq[0] - 1);
-        low = (unsigned long long) (low + (range * base_freq.cum_freq [base_freq.sym])/base_freq.cum_freq[0]);
-        for ( ; ; ) {
-            if ( high < Half ) {
-                bits_plus_follow(ofp, pending_bits, 0);
-                pending_bits = 0;
-            } else if ( low >= Half ) {
-                bits_plus_follow(ofp, pending_bits, 1);
-                pending_bits = 0;
-                low -= Half;
-                high -= Half;
-            }
-            else if ( low >= First_qtr && high < Third_qtr ) {
-                pending_bits++;
-                low -= First_qtr;
-                high -= First_qtr;
-            }
-            else
-                break;
-            high <<= 1;
-            high++;
-            low <<= 1;
-            high &= MAX_CODE;
-            low &= MAX_CODE;
-        }
-        //printf("%lld ", d_freq);
-        update(&base_freq, base_freq.sym, d_freq);
-        update(&ctrl_freq, base_freq.sym, 1);
-        memcpy(buf_freq[buf_ind], ctrl_freq.freq, 257*sizeof(*(ctrl_freq.freq)));
-        //unsigned long long dist1 = dist(buf_freq[buf_ind], buf_freq[mod(buf_ind - 1, 10)]);
-        //unsigned long long dist2 = dist(buf_freq[mod(buf_ind - 1, 10)], buf_freq[mod(buf_ind - 2, 10)]);
-        //long long d_dist = dist1 - dist2;
-        //printf("%lld ", d_freq);
-        //exps[buf_ind] = expected(base_freq.freq);
-        transform(&base_freq, buf_freq, buf_ind, step);
-        //if (fabs(exps[buf_ind] - exps[mod(buf_ind - 9, 10)]) >= MAX_EXP) {
-        //d_freq += DD_FREQ;
-        //init(&base_freq);
-        //d_freq = MIN(MAX_FREQ, d_freq + DD_FREQ);aaaa
-        //} else {
-
-        //init(&base_freq);
-        //d_freq += 2*DD_FREQ;
-        //d_freq = MAX(1000, d_freq - 1);
-        //}
-        buf_ind = (buf_ind + 1) % step;
-    }
-    if (size) {
-        pending_bits++;
-        if (low < First_qtr)
-            bits_plus_follow(ofp, pending_bits, 0);
-        else
-            bits_plus_follow(ofp, pending_bits, 1);
-        bits_plus_follow(ofp, 0, -1);
-    }
-
-    fseek(ofp, 0, SEEK_SET);
-    printf("\n\n\n\n");
+void compress_ppm(char *ifile, char *ofile) {
+    FILE *ifp = fopen(ifile, "rb");
+    FILE *ofp = fopen(ofile, "wb");
 
 
-    // This is an implementation of simple copying
-//    size_t n, m;
-//    unsigned char buff[8192];
-//
-//    do {
-//        n = fread(buff, 1, sizeof buff, ifp);
-//        if (n)
-//            m = fwrite(buff, 1, n, ofp);
-//        else
-//            m = 0;
-//    } while ((n > 0) && (n == m));
+
+    compress (ifp, ofp);
+
 
     fclose(ifp);
     fclose(ofp);
-
 }
 
-int read_bit(FILE *f)
-{
-    static unsigned char st = 0;
-    static int i = 0;
-    if (i == 0) {
-        if (fread(&st, sizeof(st), 1, f) < 1) {
-            st = 0;
-        }
-        i = 7;
-        return (st >> i) & 1;
-    } else {
-        i--;
-        return (st >> i) & 1;
-    }
-}
+void decompress_ppm(char *ifile, char *ofile) {
+    FILE *ifp = fopen(ifile, "rb");
+    FILE *ofp = fopen(ofile, "wb");
+
+    decode (ifp, ofp);
 
 
-void decompress_ari(char *ifile, char *ofile) {
-    FILE *ifp = (FILE *)fopen(ifile, "rb");
-    FILE *ofp = (FILE *)fopen(ofile, "wb");
-    unsigned long long int size;
-    fread(&size, sizeof(size), 1, ifp);
-    unsigned long long int high = MAX_CODE;
-    unsigned long long int low = 0;
-    unsigned long long int First_qtr = (high +1)/4;
-    unsigned long long int Half = First_qtr*2; // = 16384 = 32768
-    unsigned long long int Third_qtr = First_qtr*3;
-    Frequency base_freq;
-    init(&base_freq);
-    Frequency ctrl_freq;
-    init(&ctrl_freq);
-
-    double exps[10];
-    for (int i = 0; i < 10; i++) {
-        exps[i] = 128.5;
-    }
-    //unsigned long long int step = MIN(100, MAX(10, size/10));
-    unsigned long long int step = 10;
-    unsigned long long int buf_freq[step][257];
-    unsigned long long int buf_ind = 0;
-    for (int i = 0; i < step; i++) {
-        memcpy(buf_freq[i], ctrl_freq.freq, 257*sizeof(*(ctrl_freq.freq)));
-    }
-    d_freq = START_D_FREQ;
-    uint64_t value = 0;
-    for (int i = 0; i < COUNT; i++) {
-        value <<= 1;
-        int b = read_bit(ifp);
-        value += b;
-    }
-    while (size--) {
-        unsigned long long range = high - low + 1;
-        long double tmp = ((long double) (value - low + 1));
-        long double tmp1 = (tmp * base_freq.cum_freq[0] - 1);
-        unsigned long long frequency = (unsigned long long int) (tmp1 / range);
-        if (frequency == 0) {
-            int d = 7;
-        }
-        for (base_freq.sym = 1; base_freq.cum_freq[base_freq.sym] > frequency; base_freq.sym++);
-        fputc((int) base_freq.index_to_char[base_freq.sym], ofp);
-        printf("%d ", (int) base_freq.index_to_char[base_freq.sym]);
-        //fputc(base_freq.index_to_char[base_freq.sym], stdout);
-        high = low + (range * base_freq.cum_freq[base_freq.sym - 1])/base_freq.cum_freq[0] - 1;
-        low = low + (range * base_freq.cum_freq [base_freq.sym])/base_freq.cum_freq [0];
-        for (;;) {
-            if ( high < Half ) {
-                //do nothing, bit is a zero
-            } else if ( low >= Half ) {
-                value -= Half;  //subtract one half from all three code values
-                low -= Half;
-                high -= Half;
-            } else if ( low >= First_qtr && high < Third_qtr) {
-                value -= First_qtr;
-                low -= First_qtr;
-                high -= First_qtr;
-            } else
-                break;
-            low <<= 1;
-            high <<= 1;
-            high++;
-            value <<= 1;
-            value += read_bit(ifp);
-            value &= MAX_CODE;
-            low &= MAX_CODE;
-            high &= MAX_CODE;
-        }
-        //printf("%lld ", d_freq);
-        update(&base_freq, base_freq.sym, d_freq);
-        update(&ctrl_freq, base_freq.sym, 1LL);
-        memcpy(buf_freq[buf_ind], ctrl_freq.freq, 257*sizeof(*(ctrl_freq.freq)));
-        //unsigned long long dist1 = dist(buf_freq[buf_ind], buf_freq[mod(buf_ind - 1, 10)]);
-        //unsigned long long dist2 = dist(buf_freq[mod(buf_ind - 1, 10)], buf_freq[mod(buf_ind - 2, 10)]);
-        //long long d_dist = dist1 - dist2;
-        //printf("%lld ", d_freq);
-        //exps[buf_ind] = expected(base_freq.freq);
-        transform(&base_freq, buf_freq, buf_ind, step);
-        //if (fabs(exps[buf_ind] - exps[mod(buf_ind - 9, 10)]) >= MAX_EXP) {
-        //d_freq += DD_FREQ;
-        //init(&base_freq);
-        //d_freq = MIN(MAX_FREQ, d_freq + DD_FREQ);aaaa
-        //} else {
-
-        //init(&base_freq);
-        //d_freq += 2*DD_FREQ;
-        //d_freq = MAX(1000, d_freq - 1);
-        //}
-        buf_ind = (buf_ind + 1) % step;
-    }
-
-    // This is an implementation of simple copying
-//    size_t n, m;
-//    unsigned char buff[8192];
-//
-//    do {
-//        n = fread(buff, 1, sizeof buff, ifp);
-//        if (n)
-//            m = fwrite(buff, 1, n, ofp);
-//        else
-//            m = 0;
-//    } while ((n > 0) && (n == m));
 
     fclose(ifp);
     fclose(ofp);
 }
 
 
-int main(void)
-{
-//    FILE *in = fopen("f", "r");
-//    FILE *out = fopen("out.bin", "w+");
-//    FILE *out1 = fopen("out1.txt", "w");
-    compress_ari("CloakNTEngine.dll", "tmp1.bin");
-    decompress_ari("tmp1.bin", "out1.bin");
-    return 0;
+int main (int argc, char* argv[]){
+    compress_ppm("FP.LOG", "tmp.bin");
+    decompress_ppm("tmp.bin", "out.bin");
 }
